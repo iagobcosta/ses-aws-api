@@ -5,13 +5,28 @@ const helmet = require("helmet")
 const rateLimit = require("express-rate-limit")
 const { body, validationResult } = require("express-validator")
 const AWS = require("aws-sdk")
+const compression = require("compression")
+const winston = require("winston")
 
 const app = express()
 const PORT = process.env.PORT || 3001
 
+// Winston logger configuration
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || "info",
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.Console(),
+    // Adicione outros transports se necessário (ex: arquivo)
+  ],
+})
+
 // AWS SES Configuration
 const ses = new AWS.SES({
-  region: process.env.AWS_REGION || "us-east-1",
+  region: process.env.AWS_REGION,
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
 })
@@ -20,20 +35,21 @@ const ses = new AWS.SES({
 app.use(helmet())
 app.use(
   cors({
-    origin: process.env.CORS_ORIGIN || "http://localhost:5173",
+    origin: process.env.CORS_ORIGIN,
     credentials: true,
   })
 )
 app.use(express.json({ limit: "10mb" }))
+app.use(compression())
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 5, // limit each IP to 5 requests per windowMs
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS), // Definido apenas por env
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS), // Definido apenas por env
   message: {
     error: "Too many requests from this IP, please try again later.",
     retryAfter: Math.ceil(
-      (parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000) / 1000
+      parseInt(process.env.RATE_LIMIT_WINDOW_MS) / 1000
     ),
   },
   standardHeaders: true,
@@ -171,6 +187,7 @@ app.post("/api/contact", validateContactForm, async (req, res) => {
     // Check for validation errors
     const errors = validationResult(req)
     if (!errors.isEmpty()) {
+      logger.warn("Validation error on contact form", { errors: errors.array() })
       return res.status(400).json({
         success: false,
         errors: errors.array(),
@@ -225,7 +242,7 @@ Data: ${new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}
     // Send email via AWS SES
     const result = await ses.sendEmail(emailParams).promise()
 
-    console.log("Email sent successfully:", result.MessageId)
+    logger.info("Email sent successfully", { messageId: result.MessageId, to: process.env.TO_EMAIL, from: process.env.FROM_EMAIL })
 
     res.json({
       success: true,
@@ -233,7 +250,7 @@ Data: ${new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}
       messageId: result.MessageId,
     })
   } catch (error) {
-    console.error("Error sending email:", error)
+    logger.error("Error sending email", { error: error.message, stack: error.stack })
 
     res.status(500).json({
       success: false,
@@ -258,7 +275,7 @@ app.get("/api/health", (req, res) => {
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack)
+  logger.error("Unhandled error", { error: err.message, stack: err.stack })
   res.status(500).json({
     success: false,
     message: "Algo deu errado!",
@@ -278,8 +295,10 @@ app.use("*", (req, res) => {
 })
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`)
-  console.log(`📧 Email will be sent from: ${process.env.FROM_EMAIL}`)
-  console.log(`📧 Email will be sent to: ${process.env.TO_EMAIL}`)
-  console.log(`🌍 Environment: ${process.env.NODE_ENV || "development"}`)
+  logger.info("Server started", {
+    port: PORT,
+    fromEmail: process.env.FROM_EMAIL,
+    toEmail: process.env.TO_EMAIL,
+    environment: process.env.NODE_ENV || "development",
+  })
 })
